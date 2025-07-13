@@ -179,6 +179,7 @@ temp/
 *.mp4
 *.avi
 # Environment files
+object_detection
 venv/
 .env
 # IDE files

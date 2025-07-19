@@ -1,0 +1,143 @@
+name: Weapon Detection CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    outputs:
+      python-path: ${{ steps.setpath.outputs.pythonpath }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            protobuf-compiler \
+            libgl1 \
+            libsm6 \
+            libxext6 \
+            libxrender-dev \
+            xvfb \
+            jq
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install opencv-python-headless pillow matplotlib pytest requests
+
+      - name: Clone & Setup TensorFlow Object Detection API
+        run: |
+          git clone --depth 1 https://github.com/tensorflow/models.git
+          cd models/research/
+          protoc object_detection/protos/*.proto --python_out=.
+          cd $GITHUB_WORKSPACE
+          ln -s "$GITHUB_WORKSPACE/models/research/object_detection" ./object_detection || echo "Link already exists"
+
+      - id: setpath
+        run: echo "pythonpath=$GITHUB_WORKSPACE/models/research:$GITHUB_WORKSPACE" >> $GITHUB_OUTPUT
+
+  lint:
+    runs-on: ubuntu-latest
+    needs: setup
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint with flake8 (optional)
+        run: |
+          pip install flake8
+          flake8 app/ tests/
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    needs: setup
+    timeout-minutes: 8
+    env:
+      PYTHONPATH: ${{ needs.setup.outputs.python-path }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Unit Tests
+        run: pytest -v tests/test_weapon_detector.py
+
+  api-tests:
+    runs-on: ubuntu-latest
+    needs: setup
+    timeout-minutes: 8
+    env:
+      PYTHONPATH: ${{ needs.setup.outputs.python-path }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start Flask server
+        run: |
+          mkdir -p uploads
+          nohup python app/app.py > flask.log 2>&1 &
+          echo "Waiting for Flask server..."
+          sleep 5
+
+      - name: Run API tests
+        run: |
+          RESPONSE=$(curl -s -F "file=@tests/test_image.jpg" http://localhost:5000/api/detect)
+          echo "$RESPONSE" | jq .
+
+          [ $(echo "$RESPONSE" | jq '.detections.count') -ge 0 ] || exit 1
+          [ $(echo "$RESPONSE" | jq '.detections.scores | length') -ge 0 ] || exit 1
+          IMG_LENGTH=$(echo "$RESPONSE" | jq -r '.annotated_image | length')
+          [ "$IMG_LENGTH" -gt 1000 ] || exit 1
+
+          RESPONSE=$(curl -s -F "file=@README.md" http://localhost:5000/api/detect)
+          [ "$(echo "$RESPONSE" | jq '.error')" != "null" ] || exit 1
+
+  browser-tests:
+    runs-on: ubuntu-latest
+    needs: api-tests
+    timeout-minutes: 8
+    env:
+      PYTHONPATH: ${{ needs.setup.outputs.python-path }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Browser Tests
+        run: |
+          xvfb-run -a python - <<END
+          import requests
+          import base64
+          from PIL import Image
+          from io import BytesIO
+
+          with open('tests/test_image.jpg', 'rb') as f:
+              files = {'file': ('test.jpg', f, 'image/jpeg')}
+              response = requests.post('http://localhost:5000/api/detect', files=files)
+              data = response.json()
+
+          assert 'detections' in data
+          assert 'annotated_image' in data
+
+          img_bytes = base64.b64decode(data['annotated_image'])
+          img = Image.open(BytesIO(img_bytes))
+          assert img.size[0] > 0 and img.size[1] > 0
+          END
+
+  cleanup:
+    runs-on: ubuntu-latest
+    needs: [api-tests, browser-tests]
+    if: always()
+    timeout-minutes: 2
+    steps:
+      - name: Cleanup Flask Server
+        run: |
+          pkill -f "python app/app.py" || true
+          rm -rf uploads flask.log

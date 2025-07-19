@@ -12,14 +12,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     outputs:
-      python-path: ${{ steps.setpath.outputs.pythonpath }}
+      pythonpath: ${{ steps.export-path.outputs.path }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      - name: Install system packages
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt update
+          sudo apt install -y \
             protobuf-compiler \
             libgl1 \
             libsm6 \
@@ -28,7 +28,7 @@ jobs:
             xvfb \
             jq
 
-      - name: Set up Python 3.10
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.10"
@@ -39,24 +39,27 @@ jobs:
           pip install -r requirements.txt
           pip install opencv-python-headless pillow matplotlib pytest requests
 
-      - name: Clone & Setup TensorFlow Object Detection API
+      - name: Clone TensorFlow models
         run: |
           git clone --depth 1 https://github.com/tensorflow/models.git
-          cd models/research/
+          cd models/research
           protoc object_detection/protos/*.proto --python_out=.
-          cd $GITHUB_WORKSPACE
-          ln -s "$GITHUB_WORKSPACE/models/research/object_detection" ./object_detection || echo "Link already exists"
 
-      - id: setpath
-        run: echo "pythonpath=$GITHUB_WORKSPACE/models/research:$GITHUB_WORKSPACE" >> $GITHUB_OUTPUT
+      - name: Symlink object_detection
+        run: |
+          ln -s "$GITHUB_WORKSPACE/models/research/object_detection" "$GITHUB_WORKSPACE/object_detection" || echo "Link exists"
+
+      - name: Export PYTHONPATH
+        id: export-path
+        run: echo "path=$GITHUB_WORKSPACE/models/research:$GITHUB_WORKSPACE" >> "$GITHUB_OUTPUT"
 
   lint:
     runs-on: ubuntu-latest
     needs: setup
-    timeout-minutes: 5
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
-      - name: Lint with flake8 (optional)
+      - name: Lint Code
         run: |
           pip install flake8
           flake8 app/ tests/
@@ -66,70 +69,82 @@ jobs:
     needs: setup
     timeout-minutes: 8
     env:
-      PYTHONPATH: ${{ needs.setup.outputs.python-path }}
+      PYTHONPATH: ${{ needs.setup.outputs.pythonpath }}
     steps:
       - uses: actions/checkout@v4
       - name: Run Unit Tests
-        run: pytest -v tests/test_weapon_detector.py
+        run: |
+          pytest -v tests/test_weapon_detector.py
 
   api-tests:
     runs-on: ubuntu-latest
     needs: setup
     timeout-minutes: 8
     env:
-      PYTHONPATH: ${{ needs.setup.outputs.python-path }}
+      PYTHONPATH: ${{ needs.setup.outputs.pythonpath }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Start Flask server
+      - name: Start Flask App
         run: |
           mkdir -p uploads
           nohup python app/app.py > flask.log 2>&1 &
-          echo "Waiting for Flask server..."
-          sleep 5
+          echo "Waiting for server..."
+          sleep 6
 
-      - name: Run API tests
+      - name: Test API Valid Image
         run: |
           RESPONSE=$(curl -s -F "file=@tests/test_image.jpg" http://localhost:5000/api/detect)
           echo "$RESPONSE" | jq .
 
-          [ $(echo "$RESPONSE" | jq '.detections.count') -ge 0 ] || exit 1
-          [ $(echo "$RESPONSE" | jq '.detections.scores | length') -ge 0 ] || exit 1
-          IMG_LENGTH=$(echo "$RESPONSE" | jq -r '.annotated_image | length')
-          [ "$IMG_LENGTH" -gt 1000 ] || exit 1
+          echo "$RESPONSE" | jq -e '.detections.count' > /dev/null
+          echo "$RESPONSE" | jq -e '.detections.classes[0]' > /dev/null
+          echo "$RESPONSE" | jq -e '.detections.scores[0]' > /dev/null
+          echo "$RESPONSE" | jq -e '.annotated_image' > /dev/null
 
+          LEN=$(echo "$RESPONSE" | jq -r '.annotated_image' | wc -c)
+          if [ "$LEN" -lt 1000 ]; then
+            echo "Annotated image too short"; exit 1
+          fi
+
+      - name: Test API Invalid File
+        run: |
           RESPONSE=$(curl -s -F "file=@README.md" http://localhost:5000/api/detect)
-          [ "$(echo "$RESPONSE" | jq '.error')" != "null" ] || exit 1
+          echo "$RESPONSE" | jq .
+
+          ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error')
+          if [ "$ERROR_MSG" == "null" ]; then
+            echo "Invalid file test failed"; exit 1
+          fi
 
   browser-tests:
     runs-on: ubuntu-latest
     needs: api-tests
     timeout-minutes: 8
     env:
-      PYTHONPATH: ${{ needs.setup.outputs.python-path }}
+      PYTHONPATH: ${{ needs.setup.outputs.pythonpath }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Run Browser Tests
+      - name: Run Browser Detection Logic
         run: |
-          xvfb-run -a python - <<END
+          xvfb-run -a python - <<EOF
           import requests
           import base64
           from PIL import Image
           from io import BytesIO
 
-          with open('tests/test_image.jpg', 'rb') as f:
-              files = {'file': ('test.jpg', f, 'image/jpeg')}
-              response = requests.post('http://localhost:5000/api/detect', files=files)
-              data = response.json()
+          with open("tests/test_image.jpg", "rb") as f:
+              files = {"file": ("test.jpg", f, "image/jpeg")}
+              res = requests.post("http://localhost:5000/api/detect", files=files)
+              data = res.json()
 
-          assert 'detections' in data
-          assert 'annotated_image' in data
+          assert "detections" in data
+          assert "annotated_image" in data
 
-          img_bytes = base64.b64decode(data['annotated_image'])
-          img = Image.open(BytesIO(img_bytes))
+          img_data = base64.b64decode(data["annotated_image"])
+          img = Image.open(BytesIO(img_data))
           assert img.size[0] > 0 and img.size[1] > 0
-          END
+          EOF
 
   cleanup:
     runs-on: ubuntu-latest
@@ -137,7 +152,7 @@ jobs:
     if: always()
     timeout-minutes: 2
     steps:
-      - name: Cleanup Flask Server
+      - name: Clean Flask
         run: |
-          pkill -f "python app/app.py" || true
+          pkill -f "app.py" || true
           rm -rf uploads flask.log

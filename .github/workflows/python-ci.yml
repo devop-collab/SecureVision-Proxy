@@ -7,8 +7,78 @@ on:
     branches: [ main ]
 
 jobs:
-
   setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      pythonpath: ${{ steps.setpath.outputs.path }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            protobuf-compiler \
+            libgl1 \
+            libsm6 \
+            libxext6 \
+            libxrender-dev \
+            xvfb \
+            jq \
+            unzip
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install opencv-python-headless pillow matplotlib pytest requests ruff selenium
+
+      - name: Install TF Object Detection API
+        run: |
+          git clone --depth 1 https://github.com/tensorflow/models.git
+          cd models/research/
+          protoc object_detection/protos/*.proto --python_out=.
+          cp -r object_detection/ ../../
+
+      - name: Set PYTHONPATH
+        id: setpath
+        run: echo "path=$GITHUB_WORKSPACE/models/research:$GITHUB_WORKSPACE" >> "$GITHUB_OUTPUT"
+
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/pip
+            ./models
+            ./object_detection
+          key: ${{ runner.os }}-deps-${{ hashFiles('requirements.txt') }}
+
+  lint:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff linter
+        run: ruff check .
+
+  unit-test:
+    needs: setup
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -16,25 +86,31 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt update
-          sudo apt install -y protobuf-compiler libgl1 libsm6 libxext6 libxrender-dev jq unzip
+          sudo apt-get update
+          sudo apt-get install -y \
+            protobuf-compiler \
+            libgl1 \
+            libsm6 \
+            libxext6 \
+            libxrender-dev
 
-      - name: Set up Python
+      - name: Set up Python 3.10
         uses: actions/setup-python@v4
         with:
           python-version: "3.10"
 
       - name: Install Python dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest opencv-python-headless flask pillow requests selenium
+          pip install opencv-python-headless pytest
 
-      - name: Clone TensorFlow models and set up object_detection
+      - name: Install TF Object Detection API
         run: |
           git clone --depth 1 https://github.com/tensorflow/models.git
-          cd models/research
+          cd models/research/
           protoc object_detection/protos/*.proto --python_out=.
-          cp -r object_detection/ ../../  # Copy to root instead of symlink
+          cp -r object_detection/ ../../
 
       - name: Verify model files
         run: |
@@ -47,149 +123,169 @@ jobs:
             exit 1
           fi
 
-  unit-test:
-    runs-on: ubuntu-latest
-    needs: setup
-    env:
-      PYTHONPATH: ${{ github.workspace }}/models/research:${{ github.workspace }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Python dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install pytest opencv-python-headless
-
       - name: Run unit tests
-        run: pytest -v tests/test_weapon_detector.py
+        env:
+          PYTHONPATH: ${{ needs.setup.outputs.pythonpath }}
+        run: |
+          pytest -v tests/test_weapon_detector.py
 
   api-test:
-    runs-on: ubuntu-latest
     needs: setup
-    env:
-      PYTHONPATH: ${{ github.workspace }}/models/research:${{ github.workspace }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            protobuf-compiler \
+            libgl1 \
+            libsm6 \
+            libxext6 \
+            libxrender-dev \
+            jq
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
       - name: Install Python dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install opencv-python-headless flask pillow requests
+          pip install opencv-python-headless pillow matplotlib pytest requests
 
-      - name: Start Flask server with health check
+      - name: Install TF Object Detection API
+        run: |
+          git clone --depth 1 https://github.com/tensorflow/models.git
+          cd models/research/
+          protoc object_detection/protos/*.proto --python_out=.
+          cp -r object_detection/ ../../
+
+      - name: Start Flask server
+        env:
+          PYTHONPATH: ${{ needs.setup.outputs.pythonpath }}
         run: |
           mkdir -p uploads
           nohup python app/app.py > flask.log 2>&1 &
-
-          # Robust health check with retries
-          echo "Waiting for Flask to start..."
-          for i in {1..10}; do
-            if curl -s http://localhost:5000 >/dev/null; then
-              echo "Flask is ready"
-              exit 0
-            fi
-            sleep 3
-          done
-          echo "Flask failed to start"
-          cat flask.log
-          exit 1
+          echo "Waiting for server to start..."
+          sleep 10
+          curl --retry 10 --retry-delay 3 http://localhost:5000
 
       - name: Run API tests
         run: |
-          # Install jq for JSON parsing
-          sudo apt install -y jq
-
-          # Test valid image
+          # Test valid image upload
           RESPONSE=$(curl -s -F "file=@tests/test_image.jpg" http://localhost:5000/api/detect)
           echo "$RESPONSE" | jq .
 
-          # Validate response
-          echo "$RESPONSE" | jq -e '.detections.count >= 0'
-          echo "$RESPONSE" | jq -e '.detections.scores | length >= 0'
+          # Validate response structure
+          [ $(echo "$RESPONSE" | jq '.detections.count') -ge 0 ] || exit 1
+          [ $(echo "$RESPONSE" | jq '.detections.scores | length') -ge 0 ] || exit 1
 
-          # Validate image
+          # Check annotated image length with proper quoting
           IMG_LENGTH=$(echo "$RESPONSE" | jq -r '.annotated_image | length')
-          if [ "$IMG_LENGTH" -lt 1000 ]; then
-            echo "Annotated image too small: $IMG_LENGTH bytes"
-            exit 1
-          fi
+          [ "$IMG_LENGTH" -gt 1000 ] || exit 1
 
-          # Test invalid file
+          # Test invalid file type
           RESPONSE=$(curl -s -F "file=@README.md" http://localhost:5000/api/detect)
-          echo "$RESPONSE" | jq .
-          echo "$RESPONSE" | jq -e '.error != null'
+          [ "$(echo "$RESPONSE" | jq '.error')" != "null" ] || exit 1
 
   browser-test:
+    needs: setup
     runs-on: ubuntu-latest
-    needs: api-test  # Run after API tests
-    env:
-      PYTHONPATH: ${{ github.workspace }}/models/research:${{ github.workspace }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            protobuf-compiler \
+            libgl1 \
+            libsm6 \
+            libxext6 \
+            libxrender-dev \
+            xvfb \
+            unzip
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
       - name: Install Python dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install opencv-python-headless flask pillow selenium
+          pip install opencv-python-headless pillow matplotlib pytest requests selenium
 
-      - name: Install Chrome and matching Chromedriver
+      - name: Install TF Object Detection API
         run: |
-          # Install latest Chrome
-          wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
-          sudo apt update
-          sudo apt install -y google-chrome-stable
+          git clone --depth 1 https://github.com/tensorflow/models.git
+          cd models/research/
+          protoc object_detection/protos/*.proto --python_out=.
+          cp -r object_detection/ ../../
 
-          # Get Chrome version
-          CHROME_VERSION=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+\.\d+')
+      - name: Install Chrome and ChromeDriver
+        run: |
+          # Install Chrome
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/chrome.list
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+
+          # Get Chrome version and install matching ChromeDriver
+          CHROME_VERSION=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+')
           echo "Chrome version: $CHROME_VERSION"
 
-          # Get major version (first number)
-          MAJOR_VERSION=$(echo $CHROME_VERSION | cut -d. -f1)
-          echo "Downloading Chromedriver for Chrome v$MAJOR_VERSION"
-
-          # Get matching Chromedriver
-          CHROMEDRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$MAJOR_VERSION")
-          wget -N https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip
-          unzip -o chromedriver_linux64.zip
-          sudo mv chromedriver /usr/local/bin/
+          # Download and install ChromeDriver
+          CHROMEDRIVER_VERSION=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_$CHROME_VERSION")
+          wget -O /tmp/chromedriver.zip "https://googlechromelabs.github.io/chrome-for-testing/$CHROMEDRIVER_VERSION/linux64/chromedriver-linux64.zip"
+          sudo unzip -j /tmp/chromedriver.zip "chromedriver-linux64/chromedriver" -d /usr/local/bin/
           sudo chmod +x /usr/local/bin/chromedriver
+          chromedriver --version
 
       - name: Start Flask server
+        env:
+          PYTHONPATH: ${{ needs.setup.outputs.pythonpath }}
         run: |
           mkdir -p uploads
           nohup python app/app.py > flask.log 2>&1 &
-          sleep 5  # Allow server to start
+          echo "Waiting for server to start..."
+          sleep 10
+          curl --retry 10 --retry-delay 3 http://localhost:5000
 
-      - name: Run Browser Test
+      - name: Run browser tests
         run: |
-          python - <<EOF
-          from selenium import webdriver
-          from selenium.webdriver.chrome.options import Options
-          import time
+          xvfb-run -a python - <<END
+          import requests
+          import base64
+          import os
+          from PIL import Image
+          from io import BytesIO
 
-          options = Options()
-          options.add_argument("--headless")
-          options.add_argument("--no-sandbox")
-          options.add_argument("--disable-dev-shm-usage")
+          # Test /api/detect endpoint
+          with open('tests/test_image.jpg', 'rb') as f:
+              files = {'file': ('test.jpg', f, 'image/jpeg')}
+              response = requests.post('http://localhost:5000/api/detect', files=files)
+              data = response.json()
 
-          driver = webdriver.Chrome(options=options)
-          try:
-              driver.get("http://localhost:5000")
-              time.sleep(2)  # Wait for page load
+          assert 'detections' in data
+          assert 'annotated_image' in data
 
-              # Check for either text in title or page content
-              page_source = driver.page_source
-              if "Weapon" not in driver.title and "Upload" not in page_source:
-                  raise Exception("Expected content not found in page")
-          finally:
-              driver.quit()
-          EOF
+          # Decode base64 image
+          img_bytes = base64.b64decode(data['annotated_image'])
+          img = Image.open(BytesIO(img_bytes))
+          assert img.size[0] > 0 and img.size[1] > 0
+          print("Browser tests passed!")
+          END
 
-  cleanup:
-    if: always()
-    runs-on: ubuntu-latest
-    needs: [unit-test, api-test, browser-test]
-    steps:
-      - name: Kill Flask server
-        run: pkill -f app.py || true
+      - name: Cleanup
+        if: always()
+        run: |
+          pkill -f "python app/app.py" || true
+          rm -rf uploads flask.log

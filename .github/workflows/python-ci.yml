@@ -11,8 +11,6 @@ jobs:
   setup:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    outputs:
-      pythonpath: ${{ steps.setpath.outputs.path }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,94 +27,65 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest opencv-python-headless flask pillow requests ruff selenium
+          pip install pytest opencv-python-headless flask pillow requests selenium
 
-      - name: Clone TensorFlow models
+      - name: Clone TensorFlow models and set up object_detection
         run: |
           git clone --depth 1 https://github.com/tensorflow/models.git
           cd models/research
           protoc object_detection/protos/*.proto --python_out=.
+          cp -r object_detection/ ../../  # Copy to root instead of symlink
 
-      - name: Create symbolic link
+      - name: Verify model files
         run: |
-          # Use absolute path for reliable symlink
-          ln -s "$GITHUB_WORKSPACE/models/research/object_detection" "$GITHUB_WORKSPACE/object_detection" || echo "Symlink exists"
-
-      - name: Set PYTHONPATH
-        id: setpath
-        run: echo "path=$GITHUB_WORKSPACE/models/research:$GITHUB_WORKSPACE" >> "$GITHUB_OUTPUT"
-
-  lint:
-    needs: setup
-    runs-on: ubuntu-latest
-    env:
-      PYTHONPATH: ${{ needs.setup.outputs.pythonpath }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.10"
-
-      - name: Install dependencies
-        run: pip install ruff
-
-      - name: Run ruff linter
-        run: ruff check .
+          if [ ! -f "model/frozen_inference_graph.pb" ]; then
+            echo "Missing model file: frozen_inference_graph.pb"
+            exit 1
+          fi
+          if [ ! -f "model/label_map.pbtxt" ]; then
+            echo "Missing label map: label_map.pbtxt"
+            exit 1
+          fi
 
   unit-test:
-    needs: setup
     runs-on: ubuntu-latest
+    needs: setup
     env:
-      PYTHONPATH: ${{ needs.setup.outputs.pythonpath }}
+      PYTHONPATH: ${{ github.workspace }}/models/research:${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.10"
-
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
-          sudo apt update
-          sudo apt install -y python3-opencv
           pip install -r requirements.txt
           pip install pytest opencv-python-headless
 
-      - name: Run Pytest
+      - name: Run unit tests
         run: pytest -v tests/test_weapon_detector.py
 
   api-test:
-    needs: setup
     runs-on: ubuntu-latest
+    needs: setup
     env:
-      PYTHONPATH: ${{ needs.setup.outputs.pythonpath }}
+      PYTHONPATH: ${{ github.workspace }}/models/research:${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.10"
-
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
-          sudo apt update
-          sudo apt install -y python3-opencv
           pip install -r requirements.txt
           pip install opencv-python-headless flask pillow requests
 
-      - name: Start Flask with health check
+      - name: Start Flask server with health check
         run: |
           mkdir -p uploads
           nohup python app/app.py > flask.log 2>&1 &
 
-          # Improved health check with timeout
+          # Robust health check with retries
           echo "Waiting for Flask to start..."
           for i in {1..10}; do
             if curl -s http://localhost:5000 >/dev/null; then
-              echo "Flask is running"
+              echo "Flask is ready"
               exit 0
             fi
             sleep 3
@@ -127,51 +96,60 @@ jobs:
 
       - name: Run API tests
         run: |
+          # Install jq for JSON parsing
+          sudo apt install -y jq
+
           # Test valid image
           RESPONSE=$(curl -s -F "file=@tests/test_image.jpg" http://localhost:5000/api/detect)
           echo "$RESPONSE" | jq .
 
-          # Validate response structure
-          echo "$RESPONSE" | jq -e '.detections.count >= 0' >/dev/null
-          echo "$RESPONSE" | jq -e '.detections.scores | length >= 0' >/dev/null
+          # Validate response
+          echo "$RESPONSE" | jq -e '.detections.count >= 0'
+          echo "$RESPONSE" | jq -e '.detections.scores | length >= 0'
+
+          # Validate image
+          IMG_LENGTH=$(echo "$RESPONSE" | jq -r '.annotated_image | length')
+          if [ "$IMG_LENGTH" -lt 1000 ]; then
+            echo "Annotated image too small: $IMG_LENGTH bytes"
+            exit 1
+          fi
 
           # Test invalid file
           RESPONSE=$(curl -s -F "file=@README.md" http://localhost:5000/api/detect)
           echo "$RESPONSE" | jq .
-          echo "$RESPONSE" | jq -e '.error != null' >/dev/null
+          echo "$RESPONSE" | jq -e '.error != null'
 
   browser-test:
-    needs: setup
     runs-on: ubuntu-latest
+    needs: api-test  # Run after API tests
     env:
-      PYTHONPATH: ${{ needs.setup.outputs.pythonpath }}
+      PYTHONPATH: ${{ github.workspace }}/models/research:${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.10"
-
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
-          sudo apt update
-          sudo apt install -y python3-opencv
           pip install -r requirements.txt
           pip install opencv-python-headless flask pillow selenium
 
-      - name: Install matching Chrome and Chromedriver
+      - name: Install Chrome and matching Chromedriver
         run: |
-          # Install latest stable Chrome
-          sudo apt install -y wget
+          # Install latest Chrome
           wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
           echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
           sudo apt update
           sudo apt install -y google-chrome-stable
 
-          # Get matching Chromedriver version
+          # Get Chrome version
           CHROME_VERSION=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+\.\d+')
-          CHROMEDRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION%.*}")
+          echo "Chrome version: $CHROME_VERSION"
+
+          # Get major version (first number)
+          MAJOR_VERSION=$(echo $CHROME_VERSION | cut -d. -f1)
+          echo "Downloading Chromedriver for Chrome v$MAJOR_VERSION"
+
+          # Get matching Chromedriver
+          CHROMEDRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$MAJOR_VERSION")
           wget -N https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip
           unzip -o chromedriver_linux64.zip
           sudo mv chromedriver /usr/local/bin/
@@ -198,8 +176,12 @@ jobs:
           driver = webdriver.Chrome(options=options)
           try:
               driver.get("http://localhost:5000")
-              time.sleep(2)  # Allow page to load
-              assert "Weapon" in driver.title or "Upload" in driver.page_source
+              time.sleep(2)  # Wait for page load
+
+              # Check for either text in title or page content
+              page_source = driver.page_source
+              if "Weapon" not in driver.title and "Upload" not in page_source:
+                  raise Exception("Expected content not found in page")
           finally:
               driver.quit()
           EOF

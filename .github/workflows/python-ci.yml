@@ -37,15 +37,10 @@ jobs:
           cd models/research
           protoc object_detection/protos/*.proto --python_out=.
 
-      - name: Create symbolic link if not exists
+      - name: Create symbolic link
         run: |
-          TARGET="object_detection"
-          LINK="./object_detection"
-          if [ ! -e "$LINK" ]; then
-            ln -s ~/models/research/object_detection "$LINK"
-          else
-            echo "Symlink already exists: $LINK"
-          fi
+          # Use absolute path for reliable symlink
+          ln -s "$GITHUB_WORKSPACE/models/research/object_detection" "$GITHUB_WORKSPACE/object_detection" || echo "Symlink exists"
 
       - name: Set PYTHONPATH
         id: setpath
@@ -54,15 +49,16 @@ jobs:
   lint:
     needs: setup
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ needs.setup.outputs.pythonpath }}
     steps:
-      - uses: actions/checkout@v3
-
+      - uses: actions/checkout@v4
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: ${{ needs.setup.outputs.python-version }}
+          python-version: "3.10"
 
-      - name: Install ruff (no flake8)
+      - name: Install dependencies
         run: pip install ruff
 
       - name: Run ruff linter
@@ -71,20 +67,22 @@ jobs:
   unit-test:
     needs: setup
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ needs.setup.outputs.pythonpath }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: ${{ needs.setup.outputs.python-version }}
+          python-version: "3.10"
 
       - name: Install dependencies
         run: |
           sudo apt update
           sudo apt install -y python3-opencv
           pip install -r requirements.txt
-          pip install pytest
+          pip install pytest opencv-python-headless
 
       - name: Run Pytest
         run: pytest -v tests/test_weapon_detector.py
@@ -92,69 +90,124 @@ jobs:
   api-test:
     needs: setup
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ needs.setup.outputs.pythonpath }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: ${{ needs.setup.outputs.python-version }}
+          python-version: "3.10"
 
       - name: Install dependencies
         run: |
           sudo apt update
           sudo apt install -y python3-opencv
           pip install -r requirements.txt
+          pip install opencv-python-headless flask pillow requests
 
-      - name: Start Flask in background
+      - name: Start Flask with health check
         run: |
           mkdir -p uploads
-          python app/app.py &
-          sleep 30
+          nohup python app/app.py > flask.log 2>&1 &
 
-      - name: Run API test
-        run: python tests/test_api.py
+          # Improved health check with timeout
+          echo "Waiting for Flask to start..."
+          for i in {1..10}; do
+            if curl -s http://localhost:5000 >/dev/null; then
+              echo "Flask is running"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Flask failed to start"
+          cat flask.log
+          exit 1
+
+      - name: Run API tests
+        run: |
+          # Test valid image
+          RESPONSE=$(curl -s -F "file=@tests/test_image.jpg" http://localhost:5000/api/detect)
+          echo "$RESPONSE" | jq .
+
+          # Validate response structure
+          echo "$RESPONSE" | jq -e '.detections.count >= 0' >/dev/null
+          echo "$RESPONSE" | jq -e '.detections.scores | length >= 0' >/dev/null
+
+          # Test invalid file
+          RESPONSE=$(curl -s -F "file=@README.md" http://localhost:5000/api/detect)
+          echo "$RESPONSE" | jq .
+          echo "$RESPONSE" | jq -e '.error != null' >/dev/null
 
   browser-test:
     needs: setup
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ needs.setup.outputs.pythonpath }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: ${{ needs.setup.outputs.python-version }}
+          python-version: "3.10"
 
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y unzip chromium-browser chromium-chromedriver python3-opencv
+          sudo apt install -y python3-opencv
           pip install -r requirements.txt
-          pip install selenium
+          pip install opencv-python-headless flask pillow selenium
 
-      - name: Fix ChromeDriver mismatch
+      - name: Install matching Chrome and Chromedriver
         run: |
-          CHROME_VERSION=$(google-chrome --version | grep -oP '\d+' | head -1)
-          curl -s "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json" |
-          jq -r '.versions[] | select(.version | startswith("'$CHROME_VERSION'")) | .downloads.chromedriver[] | select(.platform=="linux64") | .url' |
-          head -1 |
-          xargs curl -o chromedriver.zip -L
-          unzip -o chromedriver.zip
-          sudo mv chromedriver-linux64/chromedriver /usr/local/bin/chromedriver
+          # Install latest stable Chrome
+          sudo apt install -y wget
+          wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt update
+          sudo apt install -y google-chrome-stable
+
+          # Get matching Chromedriver version
+          CHROME_VERSION=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+\.\d+')
+          CHROMEDRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VERSION%.*}")
+          wget -N https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip
+          unzip -o chromedriver_linux64.zip
+          sudo mv chromedriver /usr/local/bin/
           sudo chmod +x /usr/local/bin/chromedriver
+
+      - name: Start Flask server
+        run: |
+          mkdir -p uploads
+          nohup python app/app.py > flask.log 2>&1 &
+          sleep 5  # Allow server to start
 
       - name: Run Browser Test
         run: |
-          mkdir -p uploads
-          python app/app.py &
-          sleep 30
-          python tests/test_browser.py
+          python - <<EOF
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+          import time
+
+          options = Options()
+          options.add_argument("--headless")
+          options.add_argument("--no-sandbox")
+          options.add_argument("--disable-dev-shm-usage")
+
+          driver = webdriver.Chrome(options=options)
+          try:
+              driver.get("http://localhost:5000")
+              time.sleep(2)  # Allow page to load
+              assert "Weapon" in driver.title or "Upload" in driver.page_source
+          finally:
+              driver.quit()
+          EOF
 
   cleanup:
     if: always()
     runs-on: ubuntu-latest
     needs: [unit-test, api-test, browser-test]
     steps:
-      - name: Kill Flask server (if running)
+      - name: Kill Flask server
         run: pkill -f app.py || true

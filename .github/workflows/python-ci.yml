@@ -53,14 +53,6 @@ jobs:
       - name: Setup completed
         run: echo "Setup completed successfully"
 
-  lint:
-    needs: setup
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - name: Dummy lint step
-        run: echo "Lint step completed successfully"
-
   unit-test:
     needs: setup
     runs-on: ubuntu-latest

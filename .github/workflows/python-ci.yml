@@ -37,111 +37,119 @@ jobs:
           cd models/research
           protoc object_detection/protos/*.proto --python_out=.
 
-      - name: Symlink object_detection
+      - name: Create symbolic link if not exists
         run: |
-          ln -s "$GITHUB_WORKSPACE/models/research/object_detection" "$GITHUB_WORKSPACE/object_detection" || echo "Symlink already exists"
+          TARGET="object_detection"
+          LINK="./object_detection"
+          if [ ! -e "$LINK" ]; then
+            ln -s ~/models/research/object_detection "$LINK"
+          else
+            echo "Symlink already exists: $LINK"
+          fi
 
       - name: Set PYTHONPATH
         id: setpath
         run: echo "path=$GITHUB_WORKSPACE/models/research:$GITHUB_WORKSPACE" >> "$GITHUB_OUTPUT"
 
   lint:
-    runs-on: ubuntu-latest
     needs: setup
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install ruff
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ needs.setup.outputs.python-version }}
+
+      - name: Install ruff (no flake8)
         run: pip install ruff
-      - name: Run linter (ruff instead of flake8)
-        run: ruff . --exit-zero  # exit-zero allows warning-only behavior
 
-  unit-tests:
-    runs-on: ubuntu-latest
+      - name: Run ruff linter
+        run: ruff check .
+
+  unit-test:
     needs: setup
-    env:
-      PYTHONPATH: ${{ needs.setup.outputs.pythonpath }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install pytest
-        run: pip install pytest
-      - name: Run unit tests
-        run: pytest -v tests/test_weapon_detector.py
-
-  api-tests:
     runs-on: ubuntu-latest
-    needs: setup
-    env:
-      PYTHONPATH: ${{ needs.setup.outputs.pythonpath }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v3
 
-      - name: Install deps
-        run: pip install flask requests pillow
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ needs.setup.outputs.python-version }}
 
-      - name: Start Flask App
-        run: |
-          mkdir -p uploads
-          nohup python app/app.py > flask.log 2>&1 &
-          echo "Waiting for Flask..."
-          for i in {1..10}; do
-            if curl -s http://localhost:5000 > /dev/null; then
-              echo "Flask is ready."
-              break
-            fi
-            sleep 2
-          done
-          if ! curl -s http://localhost:5000 > /dev/null; then
-            echo "Flask failed to start:"
-            cat flask.log
-            exit 1
-          fi
-
-      - name: Test API - image upload
-        run: |
-          RESPONSE=$(curl -s -F "file=@tests/test_image.jpg" http://localhost:5000/api/detect)
-          echo "$RESPONSE" | jq .
-          echo "$RESPONSE" | jq -e '.detections.count' > /dev/null
-
-      - name: Test API - invalid file
-        run: |
-          RESPONSE=$(curl -s -F "file=@README.md" http://localhost:5000/api/detect)
-          echo "$RESPONSE" | jq .
-          echo "$RESPONSE" | jq -e '.error' > /dev/null
-
-  browser-tests:
-    runs-on: ubuntu-latest
-    needs: setup
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Chrome + Chromedriver
+      - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y chromium-browser
-          wget https://chromedriver.storage.googleapis.com/114.0.5735.90/chromedriver_linux64.zip
-          unzip chromedriver_linux64.zip
-          sudo mv chromedriver /usr/local/bin/
+          sudo apt install -y python3-opencv
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run Pytest
+        run: pytest -v tests/test_weapon_detector.py
+
+  api-test:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ needs.setup.outputs.python-version }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y python3-opencv
+          pip install -r requirements.txt
+
+      - name: Start Flask in background
+        run: |
+          mkdir -p uploads
+          python app/app.py &
+          sleep 30
+
+      - name: Run API test
+        run: python tests/test_api.py
+
+  browser-test:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ needs.setup.outputs.python-version }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y unzip chromium-browser chromium-chromedriver python3-opencv
+          pip install -r requirements.txt
+          pip install selenium
+
+      - name: Fix ChromeDriver mismatch
+        run: |
+          CHROME_VERSION=$(google-chrome --version | grep -oP '\d+' | head -1)
+          curl -s "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json" |
+          jq -r '.versions[] | select(.version | startswith("'$CHROME_VERSION'")) | .downloads.chromedriver[] | select(.platform=="linux64") | .url' |
+          head -1 |
+          xargs curl -o chromedriver.zip -L
+          unzip -o chromedriver.zip
+          sudo mv chromedriver-linux64/chromedriver /usr/local/bin/chromedriver
           sudo chmod +x /usr/local/bin/chromedriver
 
-      - name: Install Selenium
-        run: pip install selenium
-
-      - name: Run Selenium browser test
+      - name: Run Browser Test
         run: |
-          python <<EOF
-          from selenium import webdriver
-          from selenium.webdriver.chrome.options import Options
-
-          options = Options()
-          options.add_argument("--headless")
-          options.add_argument("--no-sandbox")
-          options.add_argument("--disable-dev-shm-usage")
-
-          driver = webdriver.Chrome(options=options)
-          driver.get("http://localhost:5000")
-          assert "Weapon" in driver.page_source or "Upload" in driver.page_source
-          driver.quit()
-          EOF
+          mkdir -p uploads
+          python app/app.py &
+          sleep 30
+          python tests/test_browser.py
 
   cleanup:
     if: always()

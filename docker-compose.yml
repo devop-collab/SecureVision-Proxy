@@ -1,0 +1,286 @@
+# =============================================================================
+# Production Docker Compose for AI Weapon Detection System
+# Complete stack with monitoring, logging, and high availability
+# =============================================================================
+
+version: '3.8'
+
+# Define custom networks for service isolation
+networks:
+  frontend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+  backend:
+    driver: bridge  
+    ipam:
+      config:
+        - subnet: 172.21.0.0/24
+  monitoring:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.22.0.0/24
+
+# Shared volumes for data persistence
+volumes:
+  nginx_cache:
+    driver: local
+  app_logs:
+    driver: local
+  nginx_logs:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  redis_data:
+    driver: local
+
+services:
+  # =============================================================================
+  # AI Weapon Detection Application (Scalable)
+  # =============================================================================
+  weapon-detection-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: weapon-detection-app-1
+    restart: unless-stopped
+    
+    environment:
+      - FLASK_ENV=production
+      - WORKERS=4
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=sqlite:///app.db  # Change to PostgreSQL in production
+      - MONITORING_ENABLED=true
+      - LOG_LEVEL=INFO
+    
+    volumes:
+      - ./model:/app/model:ro  # Mount pre-trained models
+      - app_logs:/app/logs
+      - /tmp:/app/uploads  # Temporary upload directory
+    
+    networks:
+      - backend
+    
+    depends_on:
+      - redis
+    
+    labels:
+      - "com.weapon-detection.service=app"
+      - "com.weapon-detection.version=1.0"
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Resource limits for optimal AI processing
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 2G
+          cpus: '1.0'
+
+  # Additional app instances for load balancing (uncomment for scaling)
+  # weapon-detection-app-2:
+  #   extends:
+  #     service: weapon-detection-app
+  #   container_name: weapon-detection-app-2
+  #   networks:
+  #     - backend
+
+  # =============================================================================
+  # Nginx Reverse Proxy with High Performance Configuration
+  # =============================================================================
+  nginx:
+    image: nginx:1.24-alpine
+    container_name: weapon-detection-nginx
+    restart: unless-stopped
+    
+    ports:
+      - "80:80"
+      - "443:443"  # HTTPS port for production
+    
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/ssl:ro  # SSL certificates directory
+      - nginx_cache:/var/cache/nginx
+      - nginx_logs:/var/log/nginx
+      - ./static:/usr/share/nginx/html:ro  # Static files
+    
+    networks:
+      - frontend
+      - backend
+    
+    depends_on:
+      - weapon-detection-app
+    
+    labels:
+      - "com.weapon-detection.service=proxy"
+      - "traefik.enable=true"
+      - "traefik.http.routers.weapon-detection.rule=Host(`weapon-detection.local`)"
+    
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    
+    # Nginx performance tuning
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+
+  # =============================================================================
+  # Redis for Caching and Session Storage
+  # =============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: weapon-detection-redis
+    restart: unless-stopped
+    
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    
+    volumes:
+      - redis_data:/data
+    
+    networks:
+      - backend
+    
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+
+  # =============================================================================
+  # Monitoring Stack
+  # =============================================================================
+  
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: weapon-detection-prometheus
+    restart: unless-stopped
+    
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    
+    ports:
+      - "9090:9090"
+    
+    networks:
+      - monitoring
+      - backend
+    
+    labels:
+      - "com.weapon-detection.service=monitoring"
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: weapon-detection-grafana
+    restart: unless-stopped
+    
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=SecureWeaponDetection2024!
+      - GF_USERS_ALLOW_SIGN_UP=false
+    
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    
+    ports:
+      - "3000:3000"
+    
+    networks:
+      - monitoring
+    
+    depends_on:
+      - prometheus
+
+  # Node Exporter for system metrics
+  node-exporter:
+    image: prom/node-exporter:v1.6.0
+    container_name: weapon-detection-node-exporter
+    restart: unless-stopped
+    
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    
+    networks:
+      - monitoring
+    
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  # =============================================================================
+  # Log Management
+  # =============================================================================
+  
+  # Fluentd for log aggregation (optional)
+  # fluentd:
+  #   image: fluent/fluentd:v1.16-debian-1
+  #   container_name: weapon-detection-fluentd
+  #   volumes:
+  #     - ./logging/fluentd.conf:/fluentd/etc/fluent.conf:ro
+  #     - app_logs:/var/log/app:ro
+  #     - nginx_logs:/var/log/nginx:ro
+  #   networks:
+  #     - monitoring
+
+# =============================================================================
+# Additional Production Configurations
+# =============================================================================
+
+# Secrets management (use Docker secrets in production)
+# secrets:
+#   ssl_certificate:
+#     file: ./ssl/weapon-detection.crt
+#   ssl_private_key:
+#     file: ./ssl/weapon-detection.key
+
+# Health check configurations
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 30s
+  timeout: 10s
+  retries: 3
+  start_period: 40s

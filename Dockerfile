@@ -141,7 +141,12 @@ RUN mkdir -p model && chown -R appuser:appuser model
 ENV PYTHONPATH="/app:/app/object_detection:${PYTHONPATH}"
 
 # Security: Set proper file permissions
-RUN chmod -R 755 /app \
+# RUN chmod -R 755 /app \
+#     && chmod -R 777 /app/uploads \
+#     && chmod -R 777 /app/logs \
+#     && find /app -name "*.py" -exec chmod 644 {} \;
+RUN mkdir -p /app/uploads /app/logs /app/models /app/static \
+    && chmod -R 755 /app \
     && chmod -R 777 /app/uploads \
     && chmod -R 777 /app/logs \
     && find /app -name "*.py" -exec chmod 644 {} \;

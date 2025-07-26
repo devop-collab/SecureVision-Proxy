@@ -1,0 +1,37 @@
+global:
+  scrape_interval: 15s  # Balance between granularity and load
+
+scrape_configs:
+  # =========================================================================
+  # WEAPON DETECTION APPLICATION METRICS
+  # =========================================================================
+  - job_name: 'weapon_detection'
+    metrics_path: '/metrics'  # Flask Prometheus endpoint
+    static_configs:
+      - targets: ['weapon-detection-app:5000']  # Matches compose service name
+    # Optional: Add relabeling for instance identification
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        regex: '(.*):\d+'
+        replacement: 'ai-app-$1'
+
+  # =========================================================================
+  # SYSTEM METRICS (NODE EXPORTER)
+  # =========================================================================
+  - job_name: 'node_exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']  # From compose services
+    # Add machine identifier
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'detection-server-01'
+
+  # =========================================================================
+  # NGINX METRICS (REQUIRES ADDITIONAL SETUP)
+  # =========================================================================
+  - job_name: 'nginx'
+    metrics_path: '/nginx_status'
+    static_configs:
+      - targets: ['nginx:80']  # Nginx service name

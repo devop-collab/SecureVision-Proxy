@@ -25,9 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender-dev \
     libglib2.0-0 \
     libgtk-3-0 \
-    libavcodec58 \
-    libavformat58 \
-    libswscale5 \
+    libavcodec59 \
+    libavformat59 \
+    libswscale6 \
     libjpeg-dev \
     libpng-dev \
     wget \
@@ -96,9 +96,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     libxrender-dev \
     libglib2.0-0 \
-    libavcodec58 \
-    libavformat58 \
-    libswscale5 \
+    libavcodec59 \
+    libavformat59 \
+    libswscale6 \
     libjpeg62-turbo \
     libpng16-16 \
     curl \

@@ -12,3 +12,5 @@ tmp
 logs
 uploads
 .dockerignore
+object_detection
+

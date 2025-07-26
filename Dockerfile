@@ -67,7 +67,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt \
 FROM python-builder as tf-builder
 
 # Install TensorFlow Object Detection API
-WORKDIR /tmp
+WORKDIR /build
 RUN git clone --depth 1 --branch master https://github.com/tensorflow/models.git \
     && cd models/research \
     && protoc object_detection/protos/*.proto --python_out=. \

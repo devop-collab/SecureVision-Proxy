@@ -64,19 +64,6 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt \
     prometheus-client \
     structlog
 
-# # Stage 3: TensorFlow Object Detection API setup
-# FROM python-builder as tf-builder
-
-# # Install TensorFlow Object Detection API
-# WORKDIR /build
-# RUN git clone --depth 1 --branch master https://github.com/tensorflow/models.git \
-#     && cd models/research \
-#     && protoc object_detection/protos/*.proto --python_out=. \
-#     && cp object_detection/meta_architectures/*.py /opt/venv/lib/python3.10/site-packages/ || true
-
-# # Preserve the object_detection directory in a persistent location
-# RUN mv models/research/object_detection /object_detection
-
 # Stage 3: TensorFlow Object Detection API setup
 FROM python-builder as tf-builder
 
@@ -84,14 +71,14 @@ WORKDIR /build
 
 RUN git clone --depth 1 --branch master https://github.com/tensorflow/models.git
 
-# Compile protobufs, install dependencies, verify success
+# Compile protos and move object_detection directory
 RUN cd models/research && \
     protoc object_detection/protos/*.proto --python_out=. && \
+    cp object_detection/packages/tf2/setup.py . && \
     python -m pip install . && \
-    test -d object_detection || (echo "object_detection not found!" && exit 1)
-
-# Copy the generated object_detection dir to safe location
-RUN mv models/research/object_detection /object_detection
+    cd /build && \
+    test -d models/research/object_detection || (echo "object_detection not found!" && exit 1) && \
+    mv models/research/object_detection /object_detection
 
 # Stage 4: Final production image
 FROM python:3.10-slim as production

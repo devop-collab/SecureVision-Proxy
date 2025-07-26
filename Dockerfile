@@ -74,7 +74,7 @@ RUN git clone --depth 1 --branch master https://github.com/tensorflow/models.git
     && cp object_detection/meta_architectures/*.py /opt/venv/lib/python3.10/site-packages/ || true
 
 # Preserve the object_detection directory in a persistent location
-RUN mv models/research/object_detection /object_detection
+RUN mv build/models/research/object_detection /object_detection
 
 # Stage 4: Final production image
 FROM python:3.10-slim as production

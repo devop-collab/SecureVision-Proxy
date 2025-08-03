@@ -3,12 +3,13 @@ import cv2
 import base64
 import redis
 import sqlite3
-from flask import Flask, render_template, request, jsonify
 import numpy as np
+from flask import Flask, render_template, request, jsonify
 from werkzeug.utils import secure_filename
 from weapon_detector import WeaponDetector  # Ensure this file exists
 
-app = Flask(__name__)  # FIXED from _name
+# Flask setup
+app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
 app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg'}
@@ -16,9 +17,15 @@ app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg'}
 # Initialize detector once
 detector = WeaponDetector()
 
+# Ensure upload directory exists
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
+# =========================
+# Web UI route
+# =========================
 @app.route('/', methods=['GET', 'POST'])
 def home():
     if request.method == 'POST':
@@ -39,17 +46,18 @@ def home():
                 image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 results = detector.detect(image_rgb)
                 
-                # Convert annotated image bytes to numpy array
                 annotated_array = cv2.imdecode(
-                    np.frombuffer(results['annotated_image'], np.uint8), 
+                    np.frombuffer(results['annotated_image'], np.uint8),
                     cv2.IMREAD_COLOR
                 )
                 _, buffer = cv2.imencode('.jpg', annotated_array)
                 annotated_img = base64.b64encode(buffer).decode('utf-8')
                 
-                return render_template('result.html',
-                                       annotated_image=annotated_img,
-                                       detections=list(zip(results['boxes'], results['scores'], results['classes'])))
+                return render_template(
+                    'result.html',
+                    annotated_image=annotated_img,
+                    detections=list(zip(results['boxes'], results['scores'], results['classes']))
+                )
             except Exception as e:
                 return render_template('index.html', error=f"Error: {str(e)}")
             finally:
@@ -58,6 +66,9 @@ def home():
     
     return render_template('index.html')
 
+# =========================
+# API route
+# =========================
 @app.route('/api/detect', methods=['POST'])
 def api_detect():
     if 'file' not in request.files:
@@ -76,10 +87,8 @@ def api_detect():
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
         results = detector.detect(image_rgb)
-
-        # Convert annotated image bytes to numpy array
         annotated_array = cv2.imdecode(
-            np.frombuffer(results['annotated_image'], np.uint8), 
+            np.frombuffer(results['annotated_image'], np.uint8),
             cv2.IMREAD_COLOR
         )
         _, buffer = cv2.imencode('.jpg', annotated_array)
@@ -97,12 +106,26 @@ def api_detect():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# Add health check endpoints
+# =========================
+# Health check route
+# =========================
 @app.route('/health')
 def health_check():
     """Health check endpoint for Docker and load balancer"""
     try:
-        # Check Redis connection if using Redis
+        # Model status
+        try:
+            if hasattr(detector, 'model') or hasattr(detector, 'detect'):
+                model_status = "healthy"
+            else:
+                model_status = "detector_not_initialized"
+        except Exception as e:
+            model_status = f"unhealthy: {str(e)}"
+        
+        # Upload directory status
+        upload_status = "healthy" if os.path.exists(app.config['UPLOAD_FOLDER']) else "upload_dir_missing"
+        
+        # Redis status
         try:
             redis_url = os.getenv('REDIS_URL')
             if redis_url:
@@ -111,38 +134,36 @@ def health_check():
                 redis_status = "healthy"
             else:
                 redis_status = "not_configured"
+        except redis.exceptions.ConnectionError:
+            redis_status = "unreachable"
         except Exception as e:
             redis_status = f"unhealthy: {str(e)}"
         
-        # Check if model detector is working
+        # SQLite status
         try:
-            # Simple test to see if detector is initialized
-            if hasattr(detector, 'model') or hasattr(detector, 'detect'):
-                model_status = "healthy"
-            else:
-                model_status = "detector_not_initialized"
+            conn = sqlite3.connect(':memory:')
+            conn.execute("SELECT 1")
+            conn.close()
+            sqlite_status = "healthy"
         except Exception as e:
-            model_status = f"unhealthy: {str(e)}"
+            sqlite_status = f"unhealthy: {str(e)}"
         
-        # Check upload directory
-        upload_status = "healthy" if os.path.exists(app.config['UPLOAD_FOLDER']) else "upload_dir_missing"
-        
-        # Overall health
+        # Overall status
         critical_services = [model_status, upload_status]
-        overall_healthy = all([status == "healthy" for status in critical_services])
+        overall_healthy = all(status == "healthy" for status in critical_services)
         
-        response = {
+        return jsonify({
             "status": "healthy" if overall_healthy else "unhealthy",
             "services": {
-                "redis": redis_status,
                 "model_detector": model_status,
                 "upload_directory": upload_status,
+                "redis": redis_status,
+                "sqlite": sqlite_status,
                 "detector_type": type(detector).__name__
             },
-            "version": "1.0"
-        }
-        
-        return jsonify(response), 200 if overall_healthy else 503
+            "version": "1.0",
+            "environment": os.getenv('FLASK_ENV', 'development')
+        }), 200 if overall_healthy else 503
     except Exception as e:
         return jsonify({
             "status": "unhealthy",
@@ -150,13 +171,13 @@ def health_check():
             "version": "1.0"
         }), 503
 
+# =========================
+# Prometheus metrics
+# =========================
 @app.route('/metrics')
 def metrics():
-    """Prometheus metrics endpoint (basic implementation)"""
-    # You can implement proper Prometheus metrics here
-    # For now, just return basic info
-    return """
-# HELP weapon_detection_requests_total Total number of requests
+    """Basic Prometheus metrics endpoint"""
+    return """# HELP weapon_detection_requests_total Total number of requests
 # TYPE weapon_detection_requests_total counter
 weapon_detection_requests_total 0
 
@@ -170,8 +191,8 @@ weapon_detection_processing_time_seconds_count 0
 weapon_detection_processing_time_seconds_sum 0
 """, 200, {'Content-Type': 'text/plain'}
 
-# Always make sure upload folder exists (even if running under Gunicorn)
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
+# =========================
+# Run the app
+# =========================
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=5000, threaded=True, debug=False)

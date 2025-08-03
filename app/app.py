@@ -1,6 +1,8 @@
 import os
 import cv2
 import base64
+import redis
+import sqlite3
 from flask import Flask, render_template, request, jsonify
 import numpy as np
 from werkzeug.utils import secure_filename
@@ -95,7 +97,81 @@ def api_detect():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# Correct main check syntax
-if __name__ == '__main__':  # Proper double underscores
-    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-    app.run(host='0.0.0.0', port=5000, threaded=True)
+# Add health check endpoints
+@app.route('/health')
+def health_check():
+    """Health check endpoint for Docker and load balancer"""
+    try:
+        # Check Redis connection if using Redis
+        try:
+            redis_url = os.getenv('REDIS_URL')
+            if redis_url:
+                redis_client = redis.Redis.from_url(redis_url)
+                redis_client.ping()
+                redis_status = "healthy"
+            else:
+                redis_status = "not_configured"
+        except Exception as e:
+            redis_status = f"unhealthy: {str(e)}"
+        
+        # Check if model detector is working
+        try:
+            # Simple test to see if detector is initialized
+            if hasattr(detector, 'model') or hasattr(detector, 'detect'):
+                model_status = "healthy"
+            else:
+                model_status = "detector_not_initialized"
+        except Exception as e:
+            model_status = f"unhealthy: {str(e)}"
+        
+        # Check upload directory
+        upload_status = "healthy" if os.path.exists(app.config['UPLOAD_FOLDER']) else "upload_dir_missing"
+        
+        # Overall health
+        critical_services = [model_status, upload_status]
+        overall_healthy = all([status == "healthy" for status in critical_services])
+        
+        response = {
+            "status": "healthy" if overall_healthy else "unhealthy",
+            "services": {
+                "redis": redis_status,
+                "model_detector": model_status,
+                "upload_directory": upload_status,
+                "detector_type": type(detector).__name__
+            },
+            "version": "1.0"
+        }
+        
+        return jsonify(response), 200 if overall_healthy else 503
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e),
+            "version": "1.0"
+        }), 503
+
+@app.route('/metrics')
+def metrics():
+    """Prometheus metrics endpoint (basic implementation)"""
+    # You can implement proper Prometheus metrics here
+    # For now, just return basic info
+    return """
+# HELP weapon_detection_requests_total Total number of requests
+# TYPE weapon_detection_requests_total counter
+weapon_detection_requests_total 0
+
+# HELP weapon_detection_processing_time_seconds Time spent processing requests
+# TYPE weapon_detection_processing_time_seconds histogram
+weapon_detection_processing_time_seconds_bucket{le="0.1"} 0
+weapon_detection_processing_time_seconds_bucket{le="0.5"} 0
+weapon_detection_processing_time_seconds_bucket{le="1.0"} 0
+weapon_detection_processing_time_seconds_bucket{le="+Inf"} 0
+weapon_detection_processing_time_seconds_count 0
+weapon_detection_processing_time_seconds_sum 0
+""", 200, {'Content-Type': 'text/plain'}
+
+# Always make sure upload folder exists (even if running under Gunicorn)
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=False)

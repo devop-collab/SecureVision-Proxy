@@ -5,7 +5,9 @@
 
 version: '3.8'
 
+# =============================================================================
 # Define custom networks for service isolation
+# =============================================================================
 networks:
   frontend:
     driver: bridge
@@ -23,7 +25,9 @@ networks:
       config:
         - subnet: 172.22.0.0/24
 
+# =============================================================================
 # Shared volumes for data persistence
+# =============================================================================
 volumes:
   nginx_cache:
     driver: local
@@ -57,17 +61,19 @@ services:
       - DATABASE_URL=sqlite:///app.db  # Change to PostgreSQL in production
       - MONITORING_ENABLED=true
       - LOG_LEVEL=INFO
+      - PYTHONPATH=/app:/app/object_detection  # Added from Claude’s version
     
     volumes:
       - ./model:/app/model:ro  # Mount pre-trained models
       - app_logs:/app/logs
-      - /tmp:/app/uploads  # Temporary upload directory
+      - ./uploads:/app/uploads  # Persistent upload directory (instead of /tmp)
     
     networks:
       - backend
     
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     
     labels:
       - "com.weapon-detection.service=app"
@@ -78,7 +84,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s  # Increased for AI model loading
     
     # Resource limits for optimal AI processing
     deploy:
@@ -90,14 +96,6 @@ services:
           memory: 2G
           cpus: '1.0'
 
-  # Additional app instances for load balancing (uncomment for scaling)
-  # weapon-detection-app-2:
-  #   extends:
-  #     service: weapon-detection-app
-  #   container_name: weapon-detection-app-2
-  #   networks:
-  #     - backend
-
   # =============================================================================
   # Nginx Reverse Proxy with High Performance Configuration
   # =============================================================================
@@ -108,11 +106,12 @@ services:
     
     ports:
       - "80:80"
-      - "443:443"  # HTTPS port for production
+      - "443:443"  # HTTPS for production
     
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./ssl:/etc/ssl:ro  # SSL certificates directory
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./ssl:/etc/ssl:ro  # SSL certificates
       - nginx_cache:/var/cache/nginx
       - nginx_logs:/var/log/nginx
       - ./static:/usr/share/nginx/html:ro  # Static files
@@ -122,20 +121,19 @@ services:
       - backend
     
     depends_on:
-      - weapon-detection-app
+      weapon-detection-app:
+        condition: service_healthy
     
     labels:
       - "com.weapon-detection.service=proxy"
-      - "traefik.enable=true"
-      - "traefik.http.routers.weapon-detection.rule=Host(`weapon-detection.local`)"
     
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      test: ["CMD", "nginx", "-t"]
       interval: 30s
       timeout: 10s
       retries: 3
     
-    # Nginx performance tuning
+    # Performance tuning
     deploy:
       resources:
         limits:
@@ -189,7 +187,7 @@ services:
       - '--web.enable-lifecycle'
     
     volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     
     ports:

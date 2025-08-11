@@ -138,7 +138,7 @@ COPY --chown=appuser:appuser . .
 RUN mkdir -p model && chown -R appuser:appuser model
 
 # Set PYTHONPATH for TensorFlow Object Detection API
-ENV PYTHONPATH="/app:/app/object_detection:${PYTHONPATH}"
+ENV PYTHONPATH="/app:/app/app:/app/object_detection:${PYTHONPATH}"
 
 # Security: Set proper file permissions
 # RUN chmod -R 755 /app \

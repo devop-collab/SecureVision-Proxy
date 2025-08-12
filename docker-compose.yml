@@ -120,9 +120,13 @@ services:
       - frontend
       - backend
     
+    # depends_on:
+    #   weapon-detection-app:
+    #     condition: service_healthy
+
     depends_on:
-      weapon-detection-app:
-        condition: service_healthy
+      - weapon-detection-app
+
     
     labels:
       - "com.weapon-detection.service=proxy"

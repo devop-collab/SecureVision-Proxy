@@ -84,7 +84,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 180s  # Increased for AI model loading
+      start_period: 60s  # Increased for AI model loading
     
     # Resource limits for optimal AI processing
     deploy:
